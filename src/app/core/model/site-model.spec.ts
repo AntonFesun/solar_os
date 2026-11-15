@@ -40,6 +40,16 @@ describe('DEMO site model', () => {
     expect(bucketCredit).toBeCloseTo(cost.exportCredit, 6);
   });
 
+  it('clips yesterday cost hours to the fixture clock', () => {
+    const from = new Date(yesterdayStart).toISOString();
+    const to = new Date(yesterdayStart + (DEMO_NOW_MS - todayStart)).toISOString();
+    const cost = queryCost(model, from, to);
+    const bucketImport = cost.buckets.reduce((sum, bucket) => sum + bucket.importCost, 0);
+    const bucketCredit = cost.buckets.reduce((sum, bucket) => sum + bucket.exportCredit, 0);
+    expect(bucketImport).toBeCloseTo(cost.importCost, 6);
+    expect(bucketCredit).toBeCloseTo(cost.exportCredit, 6);
+  });
+
   it('matches yesterday only through the same fixture clock', () => {
     const series = queryEnergy(
       model,
@@ -90,6 +100,27 @@ describe('DEMO site model', () => {
     expect(toHouse).toBeCloseTo(model.live.consumptionW, 5);
     expect(flows.solarToBattery + flows.gridToBattery).toBeCloseTo(Math.max(0, model.live.batteryW), 5);
     expect(Object.values(flows).every((watts) => watts >= -1e-9)).toBe(true);
+  });
+
+  it('keeps a low-battery alert consistent with live state of charge', () => {
+    const settings = {
+      ...DEFAULT_SETTINGS,
+      pvCapacityW: 4_000,
+      batteryCapacityWh: 8_000,
+      thresholds: { ...DEFAULT_SETTINGS.thresholds, lowSoc: 77 },
+    };
+    const shifted = buildSiteModel(settings);
+    expect(shifted.live.batterySoc).toBeGreaterThan(settings.thresholds.lowSoc);
+    expect(shifted.alerts.find((alert) => alert.id === 'low-battery')).toBeUndefined();
+
+    const stillLow = buildSiteModel({
+      ...settings,
+      thresholds: { ...settings.thresholds, lowSoc: 79 },
+    });
+    const active = stillLow.alerts.find((alert) => alert.id === 'low-battery');
+    expect(stillLow.live.batterySoc).toBeLessThan(79);
+    expect(active?.status).toBe('active');
+    expect(active?.detail).toContain(`${stillLow.live.batterySoc.toFixed(1)}%`);
   });
 
   it('only raises alerts the live fixture can justify', () => {

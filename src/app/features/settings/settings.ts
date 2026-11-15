@@ -10,9 +10,9 @@ interface Draft {
   pvCapacityW: number;
   batteryCapacityWh: number;
   currency: string;
-  importDayPerKwh: number;
-  importNightPerKwh: number;
-  exportPerKwh: number;
+  importDayPerKwh: string;
+  importNightPerKwh: string;
+  exportPerKwh: string;
   dayStartHour: number;
   dayEndHour: number;
   lowSoc: number;
@@ -89,13 +89,13 @@ interface Draft {
             </select>
           </label>
           <label>Day import / kWh
-            <input type="number" min="0" max="5" step="0.01" [value]="form().importDayPerKwh" (input)="onNumber('importDayPerKwh', $event)" />
+            <input inputmode="decimal" autocomplete="off" [value]="form().importDayPerKwh" (input)="onRate('importDayPerKwh', $event)" />
           </label>
           <label>Night import / kWh
-            <input type="number" min="0" max="5" step="0.01" [value]="form().importNightPerKwh" (input)="onNumber('importNightPerKwh', $event)" />
+            <input inputmode="decimal" autocomplete="off" [value]="form().importNightPerKwh" (input)="onRate('importNightPerKwh', $event)" />
           </label>
           <label>Export / kWh
-            <input type="number" min="0" max="5" step="0.01" [value]="form().exportPerKwh" (input)="onNumber('exportPerKwh', $event)" />
+            <input inputmode="decimal" autocomplete="off" [value]="form().exportPerKwh" (input)="onRate('exportPerKwh', $event)" />
           </label>
           <label>Day starts (UTC hour)
             <input type="number" min="0" max="22" step="1" [value]="form().dayStartHour" (input)="onNumber('dayStartHour', $event)" />
@@ -150,6 +150,10 @@ export class SettingsPage {
     this.edit({ [key]: Number((event.target as HTMLInputElement).value) });
   }
 
+  protected onRate(key: RateKey, event: Event): void {
+    this.edit({ [key]: (event.target as HTMLInputElement).value });
+  }
+
   protected onPhase(event: Event): void {
     const value = Number((event.target as HTMLSelectElement).value);
     this.edit({ phaseCount: value === 1 ? 1 : 3 });
@@ -173,9 +177,10 @@ export class SettingsPage {
   protected apply(event: Event): void {
     event.preventDefault();
     const draft = this.form();
-    const error = validate(draft);
+    const rates = readRates(draft);
+    const error = validate(draft, rates);
     this.error.set(error);
-    if (error) {
+    if (error || !rates) {
       return;
     }
     this.store.patch({
@@ -187,9 +192,9 @@ export class SettingsPage {
       batteryCapacityWh: draft.batteryCapacityWh,
       tariffs: {
         currency: draft.currency,
-        importDayPerKwh: draft.importDayPerKwh,
-        importNightPerKwh: draft.importNightPerKwh,
-        exportPerKwh: draft.exportPerKwh,
+        importDayPerKwh: rates.importDayPerKwh,
+        importNightPerKwh: rates.importNightPerKwh,
+        exportPerKwh: rates.exportPerKwh,
         dayStartHour: draft.dayStartHour,
         dayEndHour: draft.dayEndHour,
       },
@@ -219,6 +224,14 @@ type NumberKey = {
   [Key in keyof Draft]: Draft[Key] extends number ? Key : never;
 }[keyof Draft];
 
+type RateKey = 'importDayPerKwh' | 'importNightPerKwh' | 'exportPerKwh';
+
+interface TariffRates {
+  importDayPerKwh: number;
+  importNightPerKwh: number;
+  exportPerKwh: number;
+}
+
 function toDraft(settings: SiteSettings): Draft {
   return {
     name: settings.name,
@@ -228,9 +241,9 @@ function toDraft(settings: SiteSettings): Draft {
     pvCapacityW: settings.pvCapacityW,
     batteryCapacityWh: settings.batteryCapacityWh,
     currency: settings.tariffs.currency,
-    importDayPerKwh: settings.tariffs.importDayPerKwh,
-    importNightPerKwh: settings.tariffs.importNightPerKwh,
-    exportPerKwh: settings.tariffs.exportPerKwh,
+    importDayPerKwh: formatRate(settings.tariffs.importDayPerKwh),
+    importNightPerKwh: formatRate(settings.tariffs.importNightPerKwh),
+    exportPerKwh: formatRate(settings.tariffs.exportPerKwh),
     dayStartHour: settings.tariffs.dayStartHour,
     dayEndHour: settings.tariffs.dayEndHour,
     lowSoc: settings.thresholds.lowSoc,
@@ -240,7 +253,7 @@ function toDraft(settings: SiteSettings): Draft {
   };
 }
 
-function validate(draft: Draft): string | null {
+function validate(draft: Draft, rates: TariffRates | null): string | null {
   if (!draft.name.trim()) {
     return 'Installation name is required.';
   }
@@ -260,9 +273,10 @@ function validate(draft: Draft): string | null {
     return 'Battery capacity must be from 500 to 500,000 Wh.';
   }
   if (
-    !inRange(draft.importDayPerKwh, 0, 5) ||
-    !inRange(draft.importNightPerKwh, 0, 5) ||
-    !inRange(draft.exportPerKwh, 0, 5)
+    !rates ||
+    !inRange(rates.importDayPerKwh, 0, 5) ||
+    !inRange(rates.importNightPerKwh, 0, 5) ||
+    !inRange(rates.exportPerKwh, 0, 5)
   ) {
     return 'Tariff rates must be from 0 to 5.';
   }
@@ -289,4 +303,27 @@ function validate(draft: Draft): string | null {
 
 function inRange(value: number, min: number, max: number): boolean {
   return Number.isFinite(value) && value >= min && value <= max;
+}
+
+function readRates(draft: Draft): TariffRates | null {
+  const importDayPerKwh = parseRate(draft.importDayPerKwh);
+  const importNightPerKwh = parseRate(draft.importNightPerKwh);
+  const exportPerKwh = parseRate(draft.exportPerKwh);
+  if (importDayPerKwh === null || importNightPerKwh === null || exportPerKwh === null) {
+    return null;
+  }
+  return { importDayPerKwh, importNightPerKwh, exportPerKwh };
+}
+
+function parseRate(raw: string): number | null {
+  const trimmed = raw.trim();
+  if (!/^(?:\d+\.?\d*|\.\d+)$/.test(trimmed)) {
+    return null;
+  }
+  const value = Number(trimmed);
+  return Number.isFinite(value) ? value : null;
+}
+
+function formatRate(value: number): string {
+  return value.toFixed(6).replace(/\.?0+$/, '');
 }
