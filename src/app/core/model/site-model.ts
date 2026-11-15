@@ -95,6 +95,8 @@ interface DayRecord {
   atClock: LivePowers | null;
   /** Hour buckets clipped to the fixture clock. Null before that moment. */
   clockHours: EnergyPoint[] | null;
+  /** Cost of those same clipped hours, including the partial clock hour. */
+  clockHourCosts: CostBucket[] | null;
   hours: EnergyPoint[];
   hourCosts: CostBucket[];
   samples: { at: string; soc: number; powerW: number }[];
@@ -328,15 +330,7 @@ function costBuckets(model: SiteModel, from: number, to: number): CostBucket[] {
   }
   const grain = costBucketGrain(new Date(from).toISOString(), new Date(to).toISOString());
   if (grain === 'hour') {
-    const hourly = model.days.flatMap((day) =>
-      day.hourCosts.filter((bucket) => {
-        const at = Date.parse(bucket.at);
-        return at >= from && at < to;
-      }),
-    );
-    if (hourly.length > 0) {
-      return hourly;
-    }
+    return hourCostBuckets(model, from, to);
   }
   const grouped = new Map<number, Totals>();
   for (const day of model.days) {
@@ -354,6 +348,41 @@ function costBuckets(model: SiteModel, from: number, to: number): CostBucket[] {
       importCost: slice.importCost,
       exportCredit: slice.exportCredit,
     }));
+}
+
+function hourCostBuckets(model: SiteModel, from: number, to: number): CostBucket[] {
+  const buckets: CostBucket[] = [];
+  for (const day of model.days) {
+    const clockMs = day.startMs + CLOCK_OFFSET_MS;
+    const overlaps = day.startMs < to && day.simulatedEndMs > from;
+    if (!overlaps) {
+      continue;
+    }
+    if (from <= day.startMs && to === clockMs && day.clockHourCosts) {
+      buckets.push(...day.clockHourCosts);
+      continue;
+    }
+    if (from <= day.startMs && to >= day.simulatedEndMs) {
+      buckets.push(
+        ...day.hourCosts.filter((bucket) => {
+          const at = Date.parse(bucket.at);
+          return at >= from && at < to;
+        }),
+      );
+      continue;
+    }
+    buckets.push(
+      ...simulateDay(
+        model.settings,
+        day.startMs,
+        Math.min(day.simulatedEndMs, to),
+        day.startSoc,
+        false,
+        Math.max(day.startMs, from),
+      ).hourCosts,
+    );
+  }
+  return buckets;
 }
 
 function simulateDay(
@@ -374,6 +403,7 @@ function simulateDay(
   let toClock: Totals | null = null;
   let atClock: LivePowers | null = null;
   let clockHours: EnergyPoint[] | null = null;
+  let clockHourCosts: CostBucket[] | null = null;
   let belowSince: number | null = null;
   let recoveredFrom: number | null = null;
   let recoveredAt: number | null = null;
@@ -430,10 +460,29 @@ function simulateDay(
       toClock = cloneTotals(totals);
       atClock = commandAt(settings, clockMs, dayStart, soc, climate, STEP_H);
       clockHours = hour.durationH > 0 ? [...hours, toPoint(hourStart, hour)] : [...hours];
+      clockHourCosts =
+        hour.durationH > 0
+          ? [
+              ...hourCosts,
+              {
+                at: new Date(hourStart).toISOString(),
+                importCost: hour.importCost,
+                exportCredit: hour.exportCredit,
+              },
+            ]
+          : [...hourCosts];
     }
   }
 
   flushHour(endMs);
+  const endSocPct = soc * 100;
+  if (endSocPct < settings.thresholds.lowSoc) {
+    belowSince ??= endMs;
+  } else if (belowSince !== null) {
+    recoveredFrom ??= belowSince;
+    recoveredAt ??= endMs;
+    belowSince = null;
+  }
   if (atClock) {
     totals.peakSolarW = Math.max(totals.peakSolarW, atClock.solarW);
     totals.peakLoadW = Math.max(totals.peakLoadW, atClock.consumptionW);
@@ -455,6 +504,7 @@ function simulateDay(
     toClock,
     atClock,
     clockHours,
+    clockHourCosts,
     hours,
     hourCosts,
     samples: collectDetail ? samples : [],
